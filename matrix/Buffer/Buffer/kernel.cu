@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <boost/timer.hpp>
 #include <boost/format.hpp>
 #include <cuda_runtime.h>
@@ -8,12 +9,11 @@ using namespace std;
 using namespace boost;
 
 __global__ void multiplyKernel(const float* A, const float* B, float* C, const unsigned int R);
-cudaError_t multiplyWithCuda(const float* A, const float* B, float* C, const unsigned int R);
 void logTime(const string& message);
 
 int main(int argc, char* argv[]) {
-	if (argc != 2) {
-		cout << format("Usage: %1% <R>") % argv[0] << endl;
+	if (argc != 2 && argc != 3) {
+		cout << format("Usage: %1% <R> <save?>") % argv[0] << endl;
 		return EXIT_FAILURE;
 	}
 
@@ -23,63 +23,20 @@ int main(int argc, char* argv[]) {
 	float* A = new float[R * R];
 	float* B = new float[R * R];
 	float* C = new float[R * R];
-
 	logTime("Host memory allocated");
 
 	for (int i = 0; i < R * R; i++) {
-		A[i] = float(rand() % 100);
-		B[i] = float(rand() % 100);
+		A[i] = rand();
+		B[i] = rand();
 	}
-
 	logTime("Matrix randomly filled");
 
-	// Add vectors in parallel.
-	cudaError_t cudaStatus = multiplyWithCuda(A, B, C, R);
-	if (cudaStatus != cudaSuccess) {
-		cerr << "multiplyWithCuda failed!" << endl;
-		return EXIT_FAILURE;
-	}
-
-	logTime("Back to host");
-	cout << format("Result Matrix Pointer: %1$x") % C << endl;
-
-	// cudaDeviceReset must be called before exiting in order for profiling and
-	// tracing tools such as Nsight and Visual Profiler to show complete traces.
-	cudaStatus = cudaDeviceReset();
-	if (cudaStatus != cudaSuccess) {
-		cerr << "cudaDeviceReset failed!" << endl;
-		return EXIT_FAILURE;
-	}
-
-	delete[] A;
-	delete[] B;
-	delete[] C;
-
-	logTime("Finish");
-
-	return EXIT_SUCCESS;
-}
-
-__global__ void multiplyKernel(const float* A, const float* B, float* C, const unsigned int R) {
-	int row = blockIdx.x;
-	int col = threadIdx.x;
-	float sum = 0;
-
-	for (int i = 0; i < R; i++) {
-		sum += A[row * R + i] * B[i * R + col];
-	}
-
-	C[row * R + col] = sum;
-}
-
-// Helper function for using CUDA to add vectors in parallel.
-cudaError_t multiplyWithCuda(const float* A, const float* B, float* C, const unsigned int R) {
-	float* devA = NULL;
-	float* devB = NULL;
-	float* devC = NULL;
-	cudaError_t cudaStatus;
-
 	try {
+		float* devA = NULL;
+		float* devB = NULL;
+		float* devC = NULL;
+		cudaError_t cudaStatus;
+
 		cudaStatus = cudaSetDevice(0);
 		if (cudaStatus != cudaSuccess) throw runtime_error("cudaSetDevice failed! Do you have a CUDA-capable GPU installed?");
 
@@ -115,15 +72,56 @@ cudaError_t multiplyWithCuda(const float* A, const float* B, float* C, const uns
 		cudaStatus = cudaMemcpy(C, devC, R * R * sizeof(float), cudaMemcpyDeviceToHost);
 		if (cudaStatus != cudaSuccess) throw runtime_error("cudaMemcpy failed!");
 
+		cudaFree(devA);
+		cudaFree(devB);
+		cudaFree(devC);
+
+		cudaStatus = cudaDeviceReset();
+		if (cudaStatus != cudaSuccess) throw runtime_error("cudaDeviceReset failed!");
+
 	} catch (const runtime_error& e) {
 		cerr << e.what() << endl;
+		return EXIT_FAILURE;
 	}
 
-	cudaFree(devA);
-	cudaFree(devB);
-	cudaFree(devC);
+	logTime("Back to host");
+	cout << format("Result Matrix Pointer: %1$p") % C << endl;
 
-	return cudaStatus;
+	if (argc == 3) {
+		ofstream outA("A.csv");
+		ofstream outB("B.csv");
+		ofstream outC("C.csv");
+		for (int row = 0; row < R; row++) {
+			for (int col = 0; col < R; col++) {
+				outA << A[row * R + col] << " ";
+				outB << B[row * R + col] << " ";
+				outC << C[row * R + col] << " ";
+			}
+			outA << endl;
+			outB << endl;
+			outC << endl;
+		}
+		logTime("Save finish");
+	}
+
+	delete[] A;
+	delete[] B;
+	delete[] C;
+
+	logTime("Finish");
+	return EXIT_SUCCESS;
+}
+
+__global__ void multiplyKernel(const float* A, const float* B, float* C, const unsigned int R) {
+	int row = blockIdx.x;
+	int col = threadIdx.x;
+	float sum = 0;
+
+	for (int i = 0; i < R; i++) {
+		sum += A[row * R + i] * B[i * R + col];
+	}
+
+	C[row * R + col] = sum;
 }
 
 void logTime(const string& message) {

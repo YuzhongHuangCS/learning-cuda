@@ -3,7 +3,8 @@
 #include <boost/timer.hpp>
 #include <boost/format.hpp>
 #include <cuda_runtime.h>
-#include "cutil_math.h"
+#include <device_launch_parameters.h>
+#include <helper_math.h>
 
 using namespace std;
 using namespace boost;
@@ -76,7 +77,8 @@ int main(int argc, char* argv[]) {
 		if (cudaStatus != cudaSuccess) throw runtime_error((format("cudaDeviceSynchronize failed: %1%") % (cudaGetErrorString(cudaStatus))).str());
 
 		logTime("Kernel finish");
-		double gflops = pow(R, 3) / 536870912 / t.elapsed();
+
+		double gflops = 2 * pow(R, 3) * 1.0e-9f / t.elapsed();
 		cout << format("%1% GFLOPS / %2%s Computing Time") % gflops % t.elapsed() << endl;
 
 		cudaStatus = cudaMemcpyFromArray(C, devC, 0, 0, R * R * sizeof(float), cudaMemcpyDeviceToHost);
@@ -126,9 +128,10 @@ __global__ void multiplyKernel() {
 	int X = threadIdx.x;
 	int Y = blockIdx.x;
 	float4 sum;
+	float4 valueA;
 
 	for (int i = 0; i < blockDim.x; i++) {
-		float4 valueA = tex2D(texA, i, Y);
+		valueA = tex2D(texA, i, Y);
 		sum += make_float4(
 			dot(valueA, tex2D(texB, i, 4 * X)),
 			dot(valueA, tex2D(texB, i, 4 * X + 1)),

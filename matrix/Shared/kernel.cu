@@ -1,7 +1,7 @@
 
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
-
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+#include <cublas_v2.h>
 #include <string>
 #include <iostream>
 #include <fstream>
@@ -65,7 +65,7 @@ void matmulCPU(float* C, const float* A, const float* B, const int R) {
 }
 
 // Helper function for using CUDA to matmul matrix in parallel.
-cudaError_t matmulCUDA(float *C, const float *A, const float *B, const int R) {
+cudaError_t matmulCUDA(float *C, const float *A, const float *B, const int R, const int USE_BLAS) {
 	float* dev_A = NULL;
 	float* dev_B = NULL;
 	float* dev_C = NULL;
@@ -110,10 +110,22 @@ cudaError_t matmulCUDA(float *C, const float *A, const float *B, const int R) {
 		goto Error;
 	}
 
-	// Launch a kernel on the GPU with one thread for each element.
-	dim3 threadsPerBlock(BLOCK_SIZE, BLOCK_SIZE);
-	dim3 numBlocks(R / threadsPerBlock.x, R / threadsPerBlock.y);
-	matmulShared <<<numBlocks, threadsPerBlock>>> (dev_C, dev_A, dev_B, R);
+	if (USE_BLAS) {
+		cublasHandle_t handle;
+		cublasCreate(&handle);
+
+		float alpha = 1.0f;
+		float beta = 0.0f;
+		// use (AB)^T = B^T A^T to call BLAS without extra transpose
+		cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, R, R, R, &alpha, dev_B, R, dev_A, R, &beta, dev_C, R);
+
+		cublasDestroy(handle);
+	} else {
+		// Launch a kernel on the GPU with one thread for each element.
+		dim3 threadsPerBlock(BLOCK_SIZE, BLOCK_SIZE);
+		dim3 numBlocks(R / threadsPerBlock.x, R / threadsPerBlock.y);
+		matmulShared << <numBlocks, threadsPerBlock >> > (dev_C, dev_A, dev_B, R);
+	}
 
 	// Check for any errors launching the kernel
 	cudaStatus = cudaGetLastError();
@@ -156,12 +168,18 @@ float sumSquareError(float* A, float* B, const int size) {
 }
 
 int main(int argc, char* argv[]) {
-	if (argc < 2) {
-		std::cout << "Usage: ./matrix R [save](default: no)" << std::endl;
-		return 2;
+	if (argc <= 1) {
+		std::cout << "Usage: ./matrix R [USE_BLAS](default: yes) [DEBUG](default: no)" << std::endl;
+		return EXIT_FAILURE;
 	}
 
 	const int R = std::stoi(argv[1]);
+	int USE_BLAS = 1;
+	int DEBUG = 0;
+
+	if (argc >= 3) USE_BLAS = std::stoi(argv[2]);
+	if (argc >= 4) DEBUG = std::stoi(argv[3]);
+
 	float* A = new float[R * R];
 	float* B = new float[R * R];
 	float* C_CUDA = new float[R * R];
@@ -174,29 +192,32 @@ int main(int argc, char* argv[]) {
 
 	// matmulCUDA
 	auto start_time_CUDA = std::chrono::system_clock::now();
-	cudaError_t cudaStatus = matmulCUDA(C_CUDA, A, B, R);
+	cudaError_t cudaStatus = matmulCUDA(C_CUDA, A, B, R, USE_BLAS);
 	auto end_time_CUDA = std::chrono::system_clock::now();
 	auto time_CUDA = std::chrono::duration_cast<std::chrono::microseconds>(end_time_CUDA - start_time_CUDA).count() / 1e6;
+	double gflops_CUDA = 2 * pow(R, 3)/ pow(1024, 3) / time_CUDA;
 	if (cudaStatus != cudaSuccess) {
 		fprintf(stderr, "matmulCUDA failed!");
 		return EXIT_FAILURE;
 	}
 
-	// matmulCPU
-	auto start_time_CPU = std::chrono::system_clock::now();
-	//matmulCPU(C_CPU, A, B, R);
-	auto end_time_CPU = std::chrono::system_clock::now();
-	auto time_CPU = std::chrono::duration_cast<std::chrono::microseconds>(end_time_CPU - start_time_CPU).count() / 1e6;
+	std::cout << "R = " << R << ", BLOCK_SIZE = " << BLOCK_SIZE << ", USE_BLAS = " << USE_BLAS << ", time_CUDA: " << time_CUDA << ", gflops_CUDA: " << gflops_CUDA;
+	if (DEBUG) {
+		// matmulCPU
+		auto start_time_CPU = std::chrono::system_clock::now();
+		matmulCPU(C_CPU, A, B, R);
+		auto end_time_CPU = std::chrono::system_clock::now();
+		auto time_CPU = std::chrono::duration_cast<std::chrono::microseconds>(end_time_CPU - start_time_CPU).count() / 1e6;
+		double gflops_CPU = 2 * pow(R, 3) / pow(1024, 3) / time_CPU;
 
-	std::cout << "R = " << R << ", BLOCK_SIZE = " << BLOCK_SIZE << ", time_CUDA: " << time_CUDA << ", time_CPU: " << time_CPU;
-	if (memcmp(C_CUDA, C_CPU, sizeof(float) * R * R) == 0) {
-		std::cout << ", Equal Bytewise" << std::endl;
-	} else {
-		float sse = sumSquareError(C_CUDA, C_CPU, R * R);
-		std::cout << ", Sum Square Error: " << sse << std::endl;
-	}
+		std::cout << ", time_CPU: " << time_CPU << ", gflops_CPU: " << gflops_CPU;
+		if (memcmp(C_CUDA, C_CPU, sizeof(float) * R * R) == 0) {
+			std::cout << ", Equal Bytewise" << std::endl;
+		} else {
+			float sse = sumSquareError(C_CUDA, C_CPU, R * R);
+			std::cout << ", Sum Square Error: " << sse << std::endl;
+		}
 
-	if (argc > 2) {
 		std::ofstream outA("A.txt");
 		std::ofstream outB("B.txt");
 		std::ofstream outC_CUDA("C_CUDA.txt");

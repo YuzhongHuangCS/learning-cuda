@@ -6,6 +6,7 @@
 #include <iostream>
 #include <fstream>
 #include <chrono>
+
 #define BLOCK_SIZE 16
 
 __global__ void matmulGlobal(float* C, const float* A, const float* B, const int R) {
@@ -64,6 +65,8 @@ void matmulCPU(float* C, const float* A, const float* B, const int R) {
 	}
 }
 
+void matmulEigen(float* C, const float* A, const float* B, const int R);
+
 // Helper function for using CUDA to matmul matrix in parallel.
 cudaError_t matmulCUDA(float *C, const float *A, const float *B, const int R, const int USE_BLAS) {
 	float* dev_A = NULL;
@@ -110,7 +113,7 @@ cudaError_t matmulCUDA(float *C, const float *A, const float *B, const int R, co
 		goto Error;
 	}
 
-	if (USE_BLAS) {
+	if (USE_BLAS == 1) {
 		cublasHandle_t handle;
 		cublasCreate(&handle);
 
@@ -124,7 +127,11 @@ cudaError_t matmulCUDA(float *C, const float *A, const float *B, const int R, co
 		// Launch a kernel on the GPU with one thread for each element.
 		dim3 threadsPerBlock(BLOCK_SIZE, BLOCK_SIZE);
 		dim3 numBlocks(R / threadsPerBlock.x, R / threadsPerBlock.y);
-		matmulShared << <numBlocks, threadsPerBlock >> > (dev_C, dev_A, dev_B, R);
+		if (USE_BLAS == 0) {
+			matmulShared << <numBlocks, threadsPerBlock >> > (dev_C, dev_A, dev_B, R);
+		} else {
+			matmulGlobal << <numBlocks, threadsPerBlock >> > (dev_C, dev_A, dev_B, R);
+		}
 	}
 
 	// Check for any errors launching the kernel
@@ -169,16 +176,20 @@ float sumSquareError(float* A, float* B, const int size) {
 
 int main(int argc, char* argv[]) {
 	if (argc <= 1) {
-		std::cout << "Usage: ./matrix R [USE_BLAS](default: yes) [DEBUG](default: no)" << std::endl;
+		std::cout << "Usage: ./matrix R [USE_BLAS](default: yes) [USE_EIGEN](default: yes) [DEBUG](default: no) [SAVE](default: no)" << std::endl;
 		return EXIT_FAILURE;
 	}
 
 	const int R = std::stoi(argv[1]);
 	int USE_BLAS = 1;
+	int USE_EIGEN = 1;
 	int DEBUG = 0;
+	int SAVE = 0;
 
 	if (argc >= 3) USE_BLAS = std::stoi(argv[2]);
-	if (argc >= 4) DEBUG = std::stoi(argv[3]);
+	if (argc >= 4) USE_EIGEN = std::stoi(argv[3]);
+	if (argc >= 5) DEBUG = std::stoi(argv[4]);
+	if (argc >= 6) SAVE = std::stoi(argv[5]);
 
 	float* A = new float[R * R];
 	float* B = new float[R * R];
@@ -186,8 +197,8 @@ int main(int argc, char* argv[]) {
 	float* C_CPU = new float[R * R];
 
 	for (int i = 0; i < R * R; i++) {
-		A[i] = rand() % 100;
-		B[i] = rand() % 100;
+		A[i] = 2.0 * rand() / RAND_MAX - 1;
+		B[i] = 2.0 * rand() / RAND_MAX - 1;
 	}
 
 	// matmulCUDA
@@ -201,38 +212,45 @@ int main(int argc, char* argv[]) {
 		return EXIT_FAILURE;
 	}
 
-	std::cout << "R = " << R << ", BLOCK_SIZE = " << BLOCK_SIZE << ", USE_BLAS = " << USE_BLAS << ", time_CUDA: " << time_CUDA << ", gflops_CUDA: " << gflops_CUDA;
+	std::cout << "R = " << R << ", BLOCK_SIZE = " << BLOCK_SIZE << ", USE_BLAS = " << USE_BLAS << ", USE_EIGEN = " << USE_EIGEN << std::endl;
+	std::cout << "time_CUDA: " << time_CUDA << ", gflops_CUDA: " << gflops_CUDA << std::endl;
 	if (DEBUG) {
 		// matmulCPU
 		auto start_time_CPU = std::chrono::system_clock::now();
-		matmulCPU(C_CPU, A, B, R);
+		if (USE_EIGEN) {
+			matmulEigen(C_CPU, A, B, R);
+		} else {
+			matmulCPU(C_CPU, A, B, R);
+		}
 		auto end_time_CPU = std::chrono::system_clock::now();
 		auto time_CPU = std::chrono::duration_cast<std::chrono::microseconds>(end_time_CPU - start_time_CPU).count() / 1e6;
 		double gflops_CPU = 2 * pow(R, 3) / pow(1024, 3) / time_CPU;
 
-		std::cout << ", time_CPU: " << time_CPU << ", gflops_CPU: " << gflops_CPU;
+		std::cout << "time_CPU: " << time_CPU << ", gflops_CPU: " << gflops_CPU << std::endl;
 		if (memcmp(C_CUDA, C_CPU, sizeof(float) * R * R) == 0) {
-			std::cout << ", Equal Bytewise" << std::endl;
+			std::cout << "Equal Bytewise" << std::endl;
 		} else {
 			float sse = sumSquareError(C_CUDA, C_CPU, R * R);
-			std::cout << ", Sum Square Error: " << sse << std::endl;
+			std::cout << "Sum Square Error: " << sse << std::endl;
 		}
 
-		std::ofstream outA("A.txt");
-		std::ofstream outB("B.txt");
-		std::ofstream outC_CUDA("C_CUDA.txt");
-		std::ofstream outC_CPU("C_CPU.txt");
-		for (int row = 0; row < R; row++) {
-			for (int col = 0; col < R; col++) {
-				outA << A[row * R + col] << " ";
-				outB << B[row * R + col] << " ";
-				outC_CUDA << C_CUDA[row * R + col] << " ";
-				outC_CPU << C_CPU[row * R + col] << " ";
+		if (SAVE) {
+			std::ofstream outA("A.txt");
+			std::ofstream outB("B.txt");
+			std::ofstream outC_CUDA("C_CUDA.txt");
+			std::ofstream outC_CPU("C_CPU.txt");
+			for (int row = 0; row < R; row++) {
+				for (int col = 0; col < R; col++) {
+					outA << A[row * R + col] << " ";
+					outB << B[row * R + col] << " ";
+					outC_CUDA << C_CUDA[row * R + col] << " ";
+					outC_CPU << C_CPU[row * R + col] << " ";
+				}
+				outA << std::endl;
+				outB << std::endl;
+				outC_CUDA << std::endl;
+				outC_CPU << std::endl;
 			}
-			outA << std::endl;
-			outB << std::endl;
-			outC_CUDA << std::endl;
-			outC_CPU << std::endl;
 		}
 	}
 
